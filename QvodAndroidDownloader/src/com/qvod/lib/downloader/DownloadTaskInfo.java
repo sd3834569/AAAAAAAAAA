@@ -60,6 +60,9 @@ public class DownloadTaskInfo {
 	 * @return
 	 */
 	public float calcTaskProgress() {
+		if (downloadContentLength == -1) {
+			return 0;
+		}
 		return ((downloadPos-startPos)/(float)downloadContentLength) * 100;
 	}
 	
@@ -69,6 +72,9 @@ public class DownloadTaskInfo {
 	 * @return
 	 */
 	public float calcFileProgress() {
+		if (downloadContentLength == -1) {
+			return 0;
+		}
 		return (downloadPos/(float)(downloadContentLength + startPos)) * 100;
 	}
 	

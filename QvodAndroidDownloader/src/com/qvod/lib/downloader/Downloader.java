@@ -1,14 +1,19 @@
 package com.qvod.lib.downloader;
 
 import java.io.BufferedInputStream;
+import java.io.BufferedReader;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.io.InterruptedIOException;
 import java.io.OutputStream;
 import java.io.RandomAccessFile;
+import java.io.StringWriter;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.security.SecureRandom;
+import java.security.cert.X509Certificate;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -18,13 +23,36 @@ import java.util.Map.Entry;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.zip.GZIPInputStream;
 
+import javax.net.ssl.HostnameVerifier;
+import javax.net.ssl.HttpsURLConnection;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLSession;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.X509TrustManager;
+
 import android.util.Log;
 
 import com.qvod.lib.downloader.DownloadTaskInfo.ResponseCode;
 import com.qvod.lib.downloader.utils.DownloadUtils;
 
 /**
- * [描述]
+ * [基础下载器]
+ * 
+ * 后续需要处理：
+ * 1、验证UserAgent，不正确则无法下载  http://download1.52pk.com:8088/hezuo/war3_cn_cwgame.52pk.exe
+ * 2、Https -> Http的302跳转 https://www.baidu.com/link?url=jaDuPOR2sxjarDFOPJzOeWOOSxEujdRL5mkkdQxwyF-VkVghWxfEWN5aRMpgigMP2hEfomQw5AYoT7VAXLOZ2MzewDuy70z3QY32LACEq8O&wd=&eqid=e5fb891a000a933c0000000555d52b8f
+ * 3、Url请求带有特殊字符(url = url.replaceAll("%", "%25");) 且需要Cookie http://download.52pk.com:8088/down.php?fileurl=aHR0cDovL2Rvd25sb2FkMS41MnBrLmNvbTo4MDg4L2hlenVvL3dhcjNfY25fY3dnYW1lLjUycGsuZXhl%&aid=58&key=419d15f955cde9a2f172523417e8f277
+ * 4、无ContentLength http://172.20.20.208:8002/mobile/home.json
+ * 5、增加证书信任处理
+ * 6、5次以上的302跳转异常
+ * 
+ * 
+ * UrlConnection的代理可通过此方式绕过Wifi的代理设置
+ * System.setProperty("http.proxyHost", "localhost"); 
+ * System.setProperty("http.proxyPort", "xxxx"); 
+ * System.setProperty("https.proxyHost", "localhost");
+ * System.setProperty("https.proxyPort", "xxxx");
+ * 
  * @author 李理
  * @date 2015年8月17日
  */
@@ -57,7 +85,44 @@ public class Downloader implements IDownloader {
 	/**
 	 * 是否打印头信息
 	 */
-	private static boolean IS_PRINT_HEAD_INFO = false;
+	private static boolean IS_PRINT_HEAD_INFO = true;
+	
+	static {
+		try {
+			SSLContext sc = SSLContext.getInstance("SSL");  
+            sc.init(null, new TrustManager[]{new MyTrustManager()}, new SecureRandom());  
+            HttpsURLConnection.setDefaultSSLSocketFactory(sc.getSocketFactory());  
+            HttpsURLConnection.setDefaultHostnameVerifier(new MyHostnameVerifier()); 
+		} catch(Exception e) {
+			e.printStackTrace();
+		}
+	}
+	
+	//TODO 待处理
+	static class MyTrustManager implements X509TrustManager {
+
+		public void checkClientTrusted(X509Certificate[] chain, String authType) {
+			Log.v(TAG, "checkClientTrusted");
+		}
+
+		public void checkServerTrusted(X509Certificate[] chain, String authType) {
+			Log.v(TAG, "checkServerTrusted cert: " + chain[0].toString() + ", authType: " + authType);
+		}
+
+		public X509Certificate[] getAcceptedIssuers() {
+			Log.v(TAG, "getAcceptedIssuers");
+			return null;
+		}
+	}
+
+	//TODO 待处理
+	static class MyHostnameVerifier implements HostnameVerifier {
+
+		public boolean verify(String hostname, SSLSession session) {
+			Log.v(TAG, "HostnameVerifier verifyWarning: URL Host: " + hostname + " vs. " + session.getPeerHost());
+			return true;
+		}
+	}
 
 	
 	public void download(String url, String saveFileDir) {
@@ -199,6 +264,7 @@ public class Downloader implements IDownloader {
 				}
 			}
 			
+			conn.connect();
 			int responseCode = conn.getResponseCode();
 			if (! mIsRun.get()) {
 				Log.i(TAG, "download 任务被暂停 - currentDownloadSize:" + mCurrentDownloadSize + " - url:" + url);
@@ -217,6 +283,7 @@ public class Downloader implements IDownloader {
 			}
 			
 			if (IS_PRINT_HEAD_INFO) {
+				Log.v(TAG, "download request url: " + mDownloadParameter.url);
 				Map<String, List<String>> map = conn.getHeaderFields();
 				if (map != null) {
 					Iterator<Entry<String, List<String>>> it = map.entrySet().iterator();
@@ -235,18 +302,27 @@ public class Downloader implements IDownloader {
 						Log.v(TAG, "KEY:" + key + " - VALUE:" + builder.toString());
 					}
 				}
+				
 			}
 			
+			Log.v(TAG, "getContentLength:" + conn.getContentLength()
+					+ " getContentEncoding:" + conn.getContentEncoding()
+					+ " usingProxy:" + conn.usingProxy() 
+					+ " getFollowRedirects:" + conn.getFollowRedirects()
+					);
+		
 			long contentLength = -1;
 			String len = conn.getHeaderField("Content-Length");
 			if (DownloadUtils.isNumber(len)) {
 				contentLength = Long.parseLong(len.toString());
 			}
-			if (contentLength <= 0) {
-				Log.i(TAG, "download 远程文件长度异常 - currentDownloadSize:" + mCurrentDownloadSize + " - contentLength:" + contentLength);
-				updateDownloadTaskInfo(DownloadState.STATE_ERROR, ResponseCode.RESPONSE_CONTENT_LENGTH_ERROR);
-				return;
-			}
+			
+//			if (contentLength <= 0) {
+//				Log.i(TAG, "download 远程文件长度异常 - currentDownloadSize:" + mCurrentDownloadSize + " - contentLength:" + contentLength);
+//				updateDownloadTaskInfo(DownloadState.STATE_ERROR, ResponseCode.RESPONSE_CONTENT_LENGTH_ERROR);
+//				return;
+//			}
+			
 			//对参数的长度矫正
 //			Log.v(TAG, "start downloading currentDownloadSize: " + currentDownloadSize + " - contentLength:" + contentLength);
 			mDownloadContentLength = contentLength;
@@ -295,9 +371,11 @@ public class Downloader implements IDownloader {
 			Log.v(TAG, "download InterruptedIOException " + e.toString());
 			updateDownloadTaskInfo(DownloadState.STATE_ERROR, ResponseCode.NETWORK_TIME_OUT_ERROR);
 		} catch(IOException e){
+			e.printStackTrace();
 			Log.e(TAG, "download IOException " + e.toString());
 			updateDownloadTaskInfo(DownloadState.STATE_ERROR, ResponseCode.NETWORK_ERROR);
 		} catch (Exception e) {
+			e.printStackTrace();
 			Log.e(TAG, "download Exception " + e.toString());
 			updateDownloadTaskInfo(DownloadState.STATE_ERROR, ResponseCode.OTHER_ERROR);
 		}
@@ -311,6 +389,47 @@ public class Downloader implements IDownloader {
 			}
 			if (conn != null) {
 				conn.disconnect();
+			}
+		}
+	}
+	
+	/**
+	 * 将流转换成字符
+	 * 
+	 * @param stream
+	 * @param charset
+	 * @return
+	 * @throws IOException
+	 */
+	public static String getStreamAsString(InputStream stream, String charset)
+			throws IOException {
+
+		String resultString = "";
+
+		if (stream == null || charset == null) {
+			return null;
+		}
+
+		try {
+			BufferedReader reader = new BufferedReader(new InputStreamReader(
+					stream, charset));
+			StringWriter writer = new StringWriter();
+			char[] chars = new char[256];
+			int count = 0;
+			while ((count = reader.read(chars)) > 0) {
+				writer.write(chars, 0, count);
+			}
+
+			resultString = writer.toString();
+			// Log.v(TAG, "返回的结果: "+ resultString);
+			return resultString;
+		} catch (Exception e) {
+			e.printStackTrace();
+			return null;
+		} finally {
+			if (stream != null) {
+
+				stream.close();
 			}
 		}
 	}
@@ -371,22 +490,31 @@ public class Downloader implements IDownloader {
 			Map<String, String> httpHead, int connectTimeOut, int readTimeout, 
 			long startPos, long endPos) throws IOException {
 		
-		HttpURLConnection conn = null;
-		
-		conn = (HttpURLConnection) url.openConnection();
+		HttpURLConnection conn = (HttpURLConnection) url.openConnection();
 		conn.setRequestMethod(method);
 		conn.setDoInput(true);
 		conn.setConnectTimeout(connectTimeOut);
 		conn.setReadTimeout(readTimeout);
 		conn.setRequestProperty("Accept", "*/*");
-		conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded;charset=" + DEFAULT_CHARSET);
 		conn.setRequestProperty("connection", "Keep-Alive");
+		/**
+		 * By default this implementation of HttpURLConnection requests that
+		 * servers use gzip compression. Since getContentLength() returns
+		 * the number of bytes transmitted, you cannot use that method to
+		 * predict how many bytes can be read from getInputStream().
+		 * Instead, read that stream until it is exhausted: when read()
+		 * returns -1. Gzip compression can be disabled by setting the
+		 * acceptable encodings in the request header。
+		 */
+		conn.setRequestProperty("Accept-Encoding", "identity"); 
  		if (startPos > 0 && endPos > 0) {
 			//不能设置end范围，部分服务器不支持end参数会导致请求错误
 			conn.setRequestProperty("Range", "bytes=" + startPos + "-" + endPos);
 		} else if (startPos > 0) {
 			conn.setRequestProperty("Range", "bytes=" + startPos + "-");
 		}
+ 		//TODO 待处理
+//		conn.setInstanceFollowRedirects(false);
 		
 		if (httpHead != null) {
 			Iterator<String> it = httpHead.keySet().iterator();
@@ -396,10 +524,11 @@ public class Downloader implements IDownloader {
 				
 				if (key != null && value != null) {
 					conn.setRequestProperty(key, value);
-//					Log.v(TAG, "头信息 " + key +"=" + value);
+					Log.v(TAG, "Request Header: " + key +"=" + value);
 				}
 			}
 		}
+		
 		
 		return conn;
 	}
@@ -464,6 +593,10 @@ public class Downloader implements IDownloader {
 		}
 		if (fileName == null) {
 			fileName = DownloadUtils.getFileName(mDownloadParameter.url);
+		}
+		if (fileName != null) {
+			//屏蔽文件系统中的非法字符，避免文件创建失败
+			fileName = fileName.replaceAll("\\\\|>|<|/|\"|:|\\*|\\?|\\|", "");
 		}
 		return fileName;
 	}

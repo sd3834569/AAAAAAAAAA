@@ -25,9 +25,9 @@ public class DownloadParameter {
 	
 	public String saveFileName;
 	
-	public int connectTimeout;
+	public int connectTimeout = 30 * 1000;
 	
-	public int readTimeout;
+	public int readTimeout = 30 * 1000;
 	
 	public Object tag;
 	
